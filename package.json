@@ -1,5 +1,5 @@
 {
-  "name": "react-example",
+  "name": "upsa-life-simulation",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "check": "npm run lint && npm run build"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -37,5 +38,8 @@
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=20.19.0"
   }
 }
