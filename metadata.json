@@ -1,0 +1,6 @@
+{
+  "name": "UPSA Life - 3D University Life Simulation",
+  "description": "Explore the vibrant University of Professional Studies, Accra (UPSA) campus, attend lectures, manage hostel life, socialize, text friends, and progress your university journey.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
