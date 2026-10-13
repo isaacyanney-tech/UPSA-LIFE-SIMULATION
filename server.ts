@@ -30,9 +30,19 @@ const pool = new Pool({
 });
 
 app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
 app.use(express.json({ limit: '1mb', strict: true }));
 
 type AccountRequest = Request & { accountId?: string };
+const asyncRoute = (handler: (req: AccountRequest, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    void handler(req as AccountRequest, res).catch(next);
+  };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const cookieName = 'upsa_session';
 const cookieOptions = (maxAge: number) => [
@@ -138,25 +148,25 @@ app.post('/api/auth/login', limitLogin, async (req, res) => {
   }
 });
 
-app.get('/api/auth/me', requireAccount, async (req: AccountRequest, res) => {
+app.get('/api/auth/me', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
   const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [req.accountId]);
   if (!result.rowCount) return res.status(401).json({ error: 'Account no longer exists.' });
   return res.json({ user: result.rows[0] });
-});
+}));
 
-app.post('/api/auth/logout', requireAccount, async (req: AccountRequest, res) => {
+app.post('/api/auth/logout', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
   const token = req.headers.cookie?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
   if (token) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [digest(token)]);
   res.setHeader('Set-Cookie', cookieOptions(0));
   return res.status(204).end();
-});
+}));
 
-app.get('/api/save', requireAccount, async (req: AccountRequest, res) => {
+app.get('/api/save', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
   const result = await pool.query('SELECT save_data, updated_at FROM game_saves WHERE user_id = $1', [req.accountId]);
   return res.json({ save: result.rows[0]?.save_data ?? null, updatedAt: result.rows[0]?.updated_at ?? null });
-});
+}));
 
-app.put('/api/save', requireAccount, async (req: AccountRequest, res) => {
+app.put('/api/save', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
   const data = req.body?.save;
   if (!data || typeof data !== 'object' || Array.isArray(data)) return res.status(400).json({ error: 'A save object is required.' });
   const entries = Object.entries(data);
@@ -170,15 +180,21 @@ app.put('/api/save', requireAccount, async (req: AccountRequest, res) => {
     [req.accountId, JSON.stringify(data)]
   );
   return res.json({ saved: true });
-});
+}));
 
-app.get('/api/health', async (_req, res) => {
+app.get('/api/health', asyncRoute(async (_req: AccountRequest, res: Response) => {
   try {
     await pool.query('SELECT 1');
     return res.json({ status: 'ok', database: 'connected' });
   } catch {
     return res.status(503).json({ status: 'unavailable', database: 'disconnected' });
   }
+}));
+
+
+app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Unhandled request error:', error);
+  return res.status(500).json({ error: 'The server could not complete that request.' });
 });
 
 async function startServer() {
