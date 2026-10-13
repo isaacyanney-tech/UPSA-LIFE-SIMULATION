@@ -70,17 +70,30 @@ function CloudSaveSync() {
 
 function AccountToolbar({ account, onLogout }: { account: Account; onLogout: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const logout = async () => {
     setBusy(true);
+    setError('');
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
-    } finally {
+      const saveResponse = await fetch('/api/save', {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ save: localSave() }),
+      });
+      if (!saveResponse.ok) throw new Error('Save your progress before signing out. Check your connection and try again.');
+      const response = await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+      if (!response.ok) throw new Error('Could not sign out. Please try again.');
+      for (const key of SAVE_KEYS) localStorage.removeItem(key);
       onLogout();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not sign out. Please try again.');
+      setBusy(false);
     }
   };
   return (
     <div className="fixed right-4 top-4 z-[60] flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/85 p-1.5 pl-3 shadow-xl backdrop-blur">
       <span className="max-w-[38vw] truncate text-[11px] font-semibold text-slate-300 sm:max-w-none">{account.email}</span>
+      {error && <span role="alert" className="max-w-48 text-[10px] text-rose-300">{error}</span>}
       <button disabled={busy} onClick={logout} className="rounded-full bg-white/10 px-3 py-2 text-[11px] font-bold text-white hover:bg-white/20 disabled:opacity-60">Sign out</button>
     </div>
   );
