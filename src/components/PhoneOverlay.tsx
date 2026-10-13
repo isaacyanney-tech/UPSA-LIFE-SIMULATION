@@ -121,7 +121,7 @@ export const PhoneOverlay: React.FC = () => {
     {
       id: 'ai-welcome',
       sender: 'ai',
-      text: `Hello ${student?.name || 'Scholar'}! 🇬🇭 I am UPSA Campus Guide, your personalized academic tutor and campus life advisor. Ask me anything about Accounting, IT coding, course quizzes, or campus navigation!`,
+      text: `Hello ${student?.name || 'Scholar'}! 🇬🇭 I’m your offline campus and study guide. Ask about basic course concepts, study habits, or fictional in-game locations.`,
       time: 'Just now',
     },
   ]);
