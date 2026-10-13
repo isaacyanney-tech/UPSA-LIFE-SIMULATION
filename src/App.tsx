@@ -4,7 +4,7 @@
  */
 
 import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { GameProvider, useGame } from './context/GameStateContext';
+import { clearSavedGameData, GameProvider, useGame } from './context/GameStateContext';
 import { CharacterCreation } from './components/CharacterCreation';
 import { Campus } from './components/Campus';
 import { StudentRoom } from './components/StudentRoom';
@@ -44,7 +44,7 @@ class GameErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState
   }
 
   handleReset = () => {
-    localStorage.clear();
+    clearSavedGameData();
     window.location.reload();
   };
 
