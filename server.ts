@@ -99,8 +99,6 @@ app.post('/api/auth/register', limitLogin, async (req, res) => {
   const credentials = validateCredentials(req.body);
   if (!credentials) return res.status(400).json({ error: 'Enter a valid email and a password with at least 10 characters.' });
   try {
-    const passwordHash = scryptSync(credentials.password, randomBytes(16), 64).toString('hex');
-    const salt = passwordHash.slice(0, 0); // replaced below by the serialized scrypt format
     const actualSalt = randomBytes(16).toString('hex');
     const derived = (await scryptAsync(credentials.password, actualSalt, 64) as Buffer).toString('hex');
     const encoded = `scrypt:${actualSalt}:${derived}`;
