@@ -29,6 +29,7 @@ import {
   HOSTEL_OPTIONS,
 } from '../data/gameData';
 import { audioService } from '../services/AudioService';
+import { getNpcReply } from '../services/OfflineCampusAI';
 
 // Storage Keys (strictly matching existing and required keys)
 const STORAGE_KEYS = {
@@ -648,61 +649,23 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }));
       audioService.playClick();
 
-      // Trigger automatic realistic reply based on character personality
+      // NPC dialogue is selected locally from authored deterministic rules.
       setTimeout(() => {
         const npc = NPCS[npcId];
-        let replyText = 'Noted! Catch you later around campus.';
-        if (npcId === 'ama') {
-          const amaReplies = [
-            'Perfect! Make sure you revise Chapter 4 before Dr. Boateng begins the seminar!',
-            'Thanks for checking in! Did you manage to balance the cash flow statement?',
-            'I am heading to the Central Library soon. Want to grab a quiet table together?',
-          ];
-          replyText = amaReplies[Math.floor(Math.random() * amaReplies.length)];
-        } else if (npcId === 'kwame') {
-          const kwameReplies = [
-            'Bet! Let me push this Git commit real quick and I’ll pull up.',
-            'Did you check out the new tech workshop at the IT auditorium? Looks solid!',
-            'Let’s grab FanYogo at the Students Centre afterwards.',
-          ];
-          replyText = kwameReplies[Math.floor(Math.random() * kwameReplies.length)];
-        } else if (npcId === 'esi') {
-          const esiReplies = [
-            'Aww you’re the best! I saved a special warm pastry for you next time we link up!',
-            'Business has been booming today in Banking Square! Talk to you soon!',
-            'Let’s take a walk around University Avenue this evening!',
-          ];
-          replyText = esiReplies[Math.floor(Math.random() * esiReplies.length)];
-        } else if (npcId === 'kojo') {
-          const kojoReplies = [
-            'Top man! Remember to stretch before coming onto the AstroTurf pitch!',
-            'The match is going to be electric! Bring your A-game!',
-            'Respect! Let’s link up near the sports complex pavilion.',
-          ];
-          replyText = kojoReplies[Math.floor(Math.random() * kojoReplies.length)];
-        }
-
         const replyMsg: ChatMessage = {
           id: `msg-${Date.now() + 1}`,
           senderId: npcId,
-          text: replyText,
-          timestamp: `${String(gameTime.hour).padStart(2, '0')}:${String(
-            (gameTime.minute + 2) % 60
-          ).padStart(2, '0')}`,
+          text: getNpcReply(npcId, text, gameTime.hour, friendships[npcId]?.score ?? 10),
+          timestamp: `${String(gameTime.hour).padStart(2, '0')}:${String((gameTime.minute + 2) % 60).padStart(2, '0')}`,
           isRead: false,
         };
-
-        setChats((prev) => ({
-          ...prev,
-          [npcId]: [...(prev[npcId] || []), replyMsg],
-        }));
-
+        setChats((prev) => ({ ...prev, [npcId]: [...(prev[npcId] || []), replyMsg] }));
         audioService.playPhoneChime();
         adjustFriendship(npcId, 3);
         showToast(`💬 New text from ${npc?.name || npcId}`);
-      }, 1600);
+      }, 900);
     },
-    [gameTime, adjustFriendship, showToast]
+    [gameTime, friendships, adjustFriendship, showToast]
   );
 
   // Missions
