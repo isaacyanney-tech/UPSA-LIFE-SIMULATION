@@ -484,8 +484,8 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // Time Progression Tick
   const passTime = useCallback((minutesToAdd: number) => {
+    const safeMinutes = Number.isFinite(minutesToAdd) ? Math.max(0, Math.floor(minutesToAdd)) : 0;
     setGameTime((prev) => {
-      const safeMinutes = Number.isFinite(minutesToAdd) ? Math.max(0, Math.floor(minutesToAdd)) : 0;
       const totalMins = prev.minute + safeMinutes;
       const totalHours = prev.hour + Math.floor(totalMins / 60);
       const remainingMins = totalMins % 60;
