@@ -6,11 +6,9 @@ A browser-based campus life game for UPSA students. Explore the fictional campus
 
 Requirements: Node.js 20.19+ and Docker Desktop (or another PostgreSQL 16 server).
 
-1. Copy `.env.example` to `.env`.
-2. Start the local database: `docker compose up -d db`.
-For the easiest local run, use `docker compose up --build` and open http://localhost:3000. The compose stack builds the app and starts PostgreSQL.
+The quickest full-stack run is `docker compose up --build`; then open http://localhost:3000. Docker Desktop must be running. This starts PostgreSQL and builds the app.
 
-For frontend development with hot reload, start just the database with `docker compose up -d db`, then run `npm install` and `npm run dev`. The server creates the required database tables on startup. Create an account to sync progress to PostgreSQL.
+For frontend development with hot reload, copy `.env.example` to `.env`, run `docker compose up -d db`, then run `npm install` and `npm run dev`. The server creates the required database tables on startup. Create an account to sync progress to PostgreSQL.
 
 ## Build and production server
 
