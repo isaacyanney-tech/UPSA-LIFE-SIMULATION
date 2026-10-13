@@ -2,7 +2,7 @@
  * UPSA Life - Responsive Floating Smartphone Overlay
  * Features:
  * 1. UPSA ID Profile & Vital Needs
- * 2. UPSA Genius AI (Gemini AI Powered Campus & Study Mentor)
+ * 2. UPSA Campus Guide (offline guide AI Powered Campus & Study Mentor)
  * 3. Social (ChitChat with coursemates, texting with typing isolation)
  * 4. CampusPay / MTN MoMo Wallet (With instant deposit allowance)
  * 5. OSIS Academic Portal (Timetable & Cumulative GPA)
@@ -44,6 +44,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { audioService } from '../services/AudioService';
+import { getOfflineTutorReply } from '../services/OfflineCampusAI';
 
 export const PhoneOverlay: React.FC = () => {
   const {
@@ -120,11 +121,10 @@ export const PhoneOverlay: React.FC = () => {
     {
       id: 'ai-welcome',
       sender: 'ai',
-      text: `Hello ${student?.name || 'Scholar'}! 🇬🇭 I am UPSA Genius AI, your personalized academic tutor and campus life advisor. Ask me anything about Accounting, IT coding, course quizzes, or campus navigation!`,
+      text: `Hello ${student?.name || 'Scholar'}! 🇬🇭 I am UPSA Campus Guide, your personalized academic tutor and campus life advisor. Ask me anything about Accounting, IT coding, course quizzes, or campus navigation!`,
       time: 'Just now',
     },
   ]);
-  const [useSearchGrounding, setUseSearchGrounding] = useState(false);
   const [aiInputPrompt, setAiInputPrompt] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const aiChatScrollRef = useRef<HTMLDivElement>(null);
@@ -225,85 +225,19 @@ export const PhoneOverlay: React.FC = () => {
     }
   };
 
-  // AI Tutor Query Handler
-  const handleSendAiQuery = async (queryText?: string) => {
+  // Offline tutor uses authored local rules; it makes no network requests.
+  const handleSendAiQuery = (queryText?: string) => {
     const question = (queryText || aiInputPrompt).trim();
     if (!question || isAiLoading) return;
-
     audioService.playClick();
-    const userMsgId = `usr-${Date.now()}`;
-    const userTime = `${String(gameTime?.hour ?? 9).padStart(2, '0')}:${String(
-      gameTime?.minute ?? 30
-    ).padStart(2, '0')}`;
-
-    const newMessages = [
-      ...aiChatMessages,
-      { id: userMsgId, sender: 'user' as const, text: question, time: userTime },
-    ];
-    setAiChatMessages(newMessages);
+    const time = `${String(gameTime?.hour ?? 9).padStart(2, '0')}:${String(gameTime?.minute ?? 30).padStart(2, '0')}`;
+    setAiChatMessages((prev) => [
+      ...prev,
+      { id: `usr-${Date.now()}`, sender: 'user', text: question, time },
+      { id: `ai-${Date.now() + 1}`, sender: 'ai', text: getOfflineTutorReply(question, student?.programme || 'your programme'), time },
+    ]);
     setAiInputPrompt('');
-    setIsAiLoading(true);
-
-    const historyPayload = aiChatMessages.map((m) => ({
-      role: m.sender === 'user' ? 'user' : 'model',
-      text: m.text,
-    }));
-
-    try {
-      const res = await fetch('/api/ai-chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: question,
-          history: historyPayload,
-          useSearch: useSearchGrounding,
-          studentContext: {
-            name: student?.name,
-            programme: student?.programme,
-            level: student?.level,
-            gpa: student?.gpa,
-          },
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP error ${res.status}`);
-      }
-
-      const data = await res.json();
-      const reply = data.reply || 'Great question! Focus on your core courses and revise regularly.';
-      const sources = Array.isArray(data.sources) ? data.sources : [];
-
-      setAiChatMessages((prev) => [
-        ...prev,
-        {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: reply,
-          sources,
-          time: `${String(gameTime?.hour ?? 9).padStart(2, '0')}:${String(
-            gameTime?.minute ?? 30
-          ).padStart(2, '0')}`,
-        },
-      ]);
-      audioService.playSuccess();
-    } catch (err) {
-      console.warn('AI chat error, using local tutor fallback response:', err);
-      // Fallback
-      setAiChatMessages((prev) => [
-        ...prev,
-        {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: `Chale, keep your head in the books! The key to excelling at UPSA in ${
-            student?.programme || 'your programme'
-          } is reviewing Dr. Boateng and Ing. Mensah's lecture slides at the Central Library.`,
-          time: 'Just now',
-        },
-      ]);
-    } finally {
-      setIsAiLoading(false);
-    }
+    audioService.playSuccess();
   };
 
   const safeBalance = typeof walletBalance === 'number' ? walletBalance : 850;
@@ -633,39 +567,20 @@ export const PhoneOverlay: React.FC = () => {
                   </div>
                   <div>
                     <div className="font-bold text-xs text-white flex items-center gap-1.5">
-                      <span>UPSA Genius AI</span>
+                      <span>UPSA Campus Guide</span>
                       <span className="text-[9px] px-1.5 py-0.2 bg-emerald-500/20 text-emerald-300 font-mono rounded">
                         Online
                       </span>
                     </div>
                     <div className="text-[10px] text-purple-300">
-                      Multi-Turn Gemini · Grounded
+                      Offline guide · No API calls
                     </div>
                   </div>
                 </div>
 
                 {/* Search Grounding Toggle & Clear Button */}
                 <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => {
-                      setUseSearchGrounding((prev) => !prev);
-                      audioService.playClick();
-                      showToast(
-                        !useSearchGrounding
-                          ? '🔍 Google Search Grounding enabled for live info'
-                          : '⚡ Instant Campus AI mode enabled'
-                      );
-                    }}
-                    className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 ${
-                      useSearchGrounding
-                        ? 'bg-blue-600 text-white shadow-sm ring-1 ring-blue-400'
-                        : 'bg-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                    title="Toggle Google Search Grounding"
-                  >
-                    <span>Search</span>
-                    <span className="text-[8px] font-mono">{useSearchGrounding ? 'ON' : 'OFF'}</span>
-                  </button>
+                  <span className="px-2 py-1 rounded-lg text-[10px] font-bold text-emerald-300 bg-emerald-950/60">Works offline · Free</span>
 
                   <button
                     onClick={() => {
@@ -708,7 +623,7 @@ export const PhoneOverlay: React.FC = () => {
                       >
                         <p className="whitespace-pre-wrap">{msg.text}</p>
 
-                        {/* Search Grounding Sources */}
+                        {/* Sources */}
                         {msg.sources && msg.sources.length > 0 && (
                           <div className="mt-2 pt-2 border-t border-purple-500/20 text-[10px] space-y-0.5">
                             <span className="text-purple-300 font-bold block">
@@ -739,9 +654,7 @@ export const PhoneOverlay: React.FC = () => {
                   <div className="flex items-center gap-2 p-3 rounded-2xl bg-slate-800/80 border border-slate-700 text-xs text-purple-300 max-w-[80%] animate-pulse">
                     <Loader2 className="w-4 h-4 animate-spin text-purple-400" />
                     <span>
-                      {useSearchGrounding
-                        ? 'Grounding answer with Google Search...'
-                        : 'UPSA Genius is formulating academic explanation...'}
+                      {'Preparing an offline answer...'}
                     </span>
                   </div>
                 )}
@@ -778,9 +691,7 @@ export const PhoneOverlay: React.FC = () => {
                       if (e.key === 'Enter') handleSendAiQuery();
                     }}
                     placeholder={
-                      useSearchGrounding
-                        ? 'Ask with Google Search Grounding...'
-                        : 'Ask UPSA Genius AI (e.g. accounting, IT)...'
+                      'Ask the offline campus guide about study or in-game locations...'
                     }
                     className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
                   />
