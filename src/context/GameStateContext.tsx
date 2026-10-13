@@ -4,7 +4,7 @@
  * Room, Academics and Chats unified across Room, Campus and Phone.
  */
 
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useRef } from 'react';
 import {
   StudentProfile,
   StudentNeeds,
@@ -29,6 +29,7 @@ import {
   HOSTEL_OPTIONS,
 } from '../data/gameData';
 import { audioService } from '../services/AudioService';
+import { getNpcReply } from '../services/OfflineCampusAI';
 
 // Storage Keys (strictly matching existing and required keys)
 const STORAGE_KEYS = {
@@ -42,6 +43,10 @@ const STORAGE_KEYS = {
   TIME: 'upsaLifeTime',
   COURSES: 'upsaLifeCourses',
   INVENTORY: 'upsaLifeInventory',
+};
+
+export const clearSavedGameData = () => {
+  Object.values(STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
 };
 
 const DEFAULT_NEEDS: StudentNeeds = {
@@ -272,6 +277,8 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   });
 
+  const walletBalanceRef = useRef(walletBalance);
+
   const [transactions, setTransactions] = useState<WalletTransaction[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.WALLET);
@@ -478,30 +485,11 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // Time Progression Tick
   const passTime = useCallback((minutesToAdd: number) => {
+    const safeMinutes = Number.isFinite(minutesToAdd) ? Math.max(0, Math.floor(minutesToAdd)) : 0;
     setGameTime((prev) => {
-      let totalMins = prev.minute + minutesToAdd;
-      let totalHours = prev.hour + Math.floor(totalMins / 60);
+      const totalMins = prev.minute + safeMinutes;
+      const totalHours = prev.hour + Math.floor(totalMins / 60);
       const remainingMins = totalMins % 60;
-      let dayIdx = [
-        'Monday',
-        'Tuesday',
-        'Wednesday',
-        'Thursday',
-        'Friday',
-        'Saturday',
-        'Sunday',
-      ].indexOf(prev.dayName);
-      let week = prev.weekNumber;
-
-      if (totalHours >= 24) {
-        const daysAdvanced = Math.floor(totalHours / 24);
-        totalHours = totalHours % 24;
-        dayIdx = (dayIdx + daysAdvanced) % 7;
-        if (dayIdx === 0 && daysAdvanced > 0) {
-          week += 1;
-        }
-      }
-
       const days: GameTime['dayName'][] = [
         'Monday',
         'Tuesday',
@@ -511,21 +499,25 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         'Saturday',
         'Sunday',
       ];
+      const currentDayIndex = Math.max(0, days.indexOf(prev.dayName));
+      const daysAdvanced = Math.floor(totalHours / 24);
+      const newDayIndex = (currentDayIndex + daysAdvanced) % days.length;
+      const week = prev.weekNumber + Math.floor((currentDayIndex + daysAdvanced) / days.length);
       return {
         ...prev,
-        hour: totalHours,
+        hour: totalHours % 24,
         minute: remainingMins,
-        dayName: days[dayIdx],
+        dayName: days[newDayIndex],
         weekNumber: week,
       };
     });
 
     // Slight need drain on time pass
     setNeeds((prev) => ({
-      energy: Math.max(0, Math.min(100, prev.energy - Math.floor(minutesToAdd / 40))),
-      hunger: Math.max(0, Math.min(100, prev.hunger - Math.floor(minutesToAdd / 30))),
-      cleanliness: Math.max(0, Math.min(100, prev.cleanliness - Math.floor(minutesToAdd / 70))),
-      happiness: Math.max(0, Math.min(100, prev.happiness - Math.floor(minutesToAdd / 90))),
+      energy: Math.max(0, Math.min(100, prev.energy - Math.floor(safeMinutes / 40))),
+      hunger: Math.max(0, Math.min(100, prev.hunger - Math.floor(safeMinutes / 30))),
+      cleanliness: Math.max(0, Math.min(100, prev.cleanliness - Math.floor(safeMinutes / 70))),
+      happiness: Math.max(0, Math.min(100, prev.happiness - Math.floor(safeMinutes / 90))),
     }));
   }, []);
 
@@ -557,15 +549,19 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   // Modify Money (GH₵)
   const modifyMoney = useCallback(
     (amount: number, title: string, category: WalletTransaction['category']): boolean => {
-      if (amount < 0 && walletBalance + amount < 0) {
+      if (!Number.isFinite(amount)) {
+        showToast('❌ Invalid wallet amount.');
+        return false;
+      }
+      const currentBalance = walletBalanceRef.current;
+      if (amount < 0 && currentBalance + amount < 0) {
         showToast('❌ Insufficient funds in your CampusPay wallet!');
         return false;
       }
 
-      setWalletBalance((prev) => {
-        const next = Math.max(0, prev + amount);
-        return next;
-      });
+      const nextBalance = Math.max(0, currentBalance + amount);
+      walletBalanceRef.current = nextBalance;
+      setWalletBalance(nextBalance);
 
       const newTx: WalletTransaction = {
         id: `tx-${Date.now()}`,
@@ -589,7 +585,7 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
       return true;
     },
-    [walletBalance, gameTime, showToast]
+    [gameTime, showToast]
   );
 
   // Room Customization
@@ -653,61 +649,23 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }));
       audioService.playClick();
 
-      // Trigger automatic realistic reply based on character personality
+      // NPC dialogue is selected locally from authored deterministic rules.
       setTimeout(() => {
         const npc = NPCS[npcId];
-        let replyText = 'Noted! Catch you later around campus.';
-        if (npcId === 'ama') {
-          const amaReplies = [
-            'Perfect! Make sure you revise Chapter 4 before Dr. Boateng begins the seminar!',
-            'Thanks for checking in! Did you manage to balance the cash flow statement?',
-            'I am heading to the Central Library soon. Want to grab a quiet table together?',
-          ];
-          replyText = amaReplies[Math.floor(Math.random() * amaReplies.length)];
-        } else if (npcId === 'kwame') {
-          const kwameReplies = [
-            'Bet! Let me push this Git commit real quick and I’ll pull up.',
-            'Did you check out the new tech workshop at the IT auditorium? Looks solid!',
-            'Let’s grab FanYogo at the Students Centre afterwards.',
-          ];
-          replyText = kwameReplies[Math.floor(Math.random() * kwameReplies.length)];
-        } else if (npcId === 'esi') {
-          const esiReplies = [
-            'Aww you’re the best! I saved a special warm pastry for you next time we link up!',
-            'Business has been booming today in Banking Square! Talk to you soon!',
-            'Let’s take a walk around University Avenue this evening!',
-          ];
-          replyText = esiReplies[Math.floor(Math.random() * esiReplies.length)];
-        } else if (npcId === 'kojo') {
-          const kojoReplies = [
-            'Top man! Remember to stretch before coming onto the AstroTurf pitch!',
-            'The match is going to be electric! Bring your A-game!',
-            'Respect! Let’s link up near the sports complex pavilion.',
-          ];
-          replyText = kojoReplies[Math.floor(Math.random() * kojoReplies.length)];
-        }
-
         const replyMsg: ChatMessage = {
           id: `msg-${Date.now() + 1}`,
           senderId: npcId,
-          text: replyText,
-          timestamp: `${String(gameTime.hour).padStart(2, '0')}:${String(
-            (gameTime.minute + 2) % 60
-          ).padStart(2, '0')}`,
+          text: getNpcReply(npcId, text, gameTime.hour, friendships[npcId]?.score ?? 10),
+          timestamp: `${String(gameTime.hour).padStart(2, '0')}:${String((gameTime.minute + 2) % 60).padStart(2, '0')}`,
           isRead: false,
         };
-
-        setChats((prev) => ({
-          ...prev,
-          [npcId]: [...(prev[npcId] || []), replyMsg],
-        }));
-
+        setChats((prev) => ({ ...prev, [npcId]: [...(prev[npcId] || []), replyMsg] }));
         audioService.playPhoneChime();
         adjustFriendship(npcId, 3);
         showToast(`💬 New text from ${npc?.name || npcId}`);
-      }, 1600);
+      }, 900);
     },
-    [gameTime, adjustFriendship, showToast]
+    [gameTime, friendships, adjustFriendship, showToast]
   );
 
   // Missions
@@ -1057,9 +1015,10 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // Reset Data
   const resetAllGameData = useCallback(() => {
-    localStorage.clear();
+    clearSavedGameData();
     setStudent(null);
     setNeeds(DEFAULT_NEEDS);
+    walletBalanceRef.current = 850;
     setWalletBalance(850);
     setTransactions([]);
     setRoomCustomization(DEFAULT_ROOM);

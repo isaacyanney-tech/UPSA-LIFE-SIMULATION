@@ -1,151 +1,239 @@
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
+import { randomBytes, scrypt, timingSafeEqual, createHash } from 'node:crypto';
+import { promisify } from 'node:util';
 import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Pool } from 'pg';
 
 dotenv.config();
 
+const scryptAsync = promisify(scrypt);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const app = express();
-const PORT = 3000;
+const proxyHops = Number(process.env.TRUST_PROXY_HOPS || 0);
+if (Number.isInteger(proxyHops) && proxyHops > 0) app.set('trust proxy', proxyHops);
+const PORT = Number(process.env.PORT || 3000);
+const SESSION_DAYS = 14;
+const SAVE_KEYS = new Set([
+  'upsaLifeStudent', 'upsaLifeFriendships', 'upsaLifeMissionProgress', 'upsaLifeNeeds',
+  'upsaLifeWallet', 'upsaLifeRoom', 'upsaLifeChats', 'upsaLifeTime',
+  'upsaLifeCourses', 'upsaLifeInventory',
+]);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
+});
 
-app.use(express.json());
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
+app.use(express.json({ limit: '1mb', strict: true }));
 
-// Initialize Gemini API client if API key is present
-const apiKey = process.env.GEMINI_API_KEY;
-let aiClient: GoogleGenAI | null = null;
-if (apiKey) {
-  aiClient = new GoogleGenAI({ apiKey });
+type AccountRequest = Request & { accountId?: string };
+const asyncRoute = (handler: (req: AccountRequest, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    void handler(req as AccountRequest, res).catch(next);
+  };
+const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+const cookieName = 'upsa_session';
+const cookieOptions = (maxAge: number) => [
+  `${cookieName}=`,
+  'Path=/',
+  'HttpOnly',
+  'SameSite=Lax',
+  process.env.NODE_ENV === 'production' ? 'Secure' : '',
+  `Max-Age=${maxAge}`,
+].filter(Boolean).join('; ');
+
+async function requireAccount(req: AccountRequest, res: Response, next: NextFunction) {
+  try {
+    const cookie = req.headers.cookie?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${cookieName}=`));
+    const token = cookie?.slice(cookieName.length + 1);
+    if (!token || token.length !== 64) return res.status(401).json({ error: 'Sign in to continue.' });
+    const result = await pool.query(
+      'SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > NOW()',
+      [digest(token)]
+    );
+    if (!result.rowCount) return res.status(401).json({ error: 'Your session has expired. Sign in again.' });
+    req.accountId = result.rows[0].user_id;
+    return next();
+  } catch (error) {
+    console.error('Session lookup failed:', error);
+    return res.status(503).json({ error: 'Account service is temporarily unavailable.' });
+  }
 }
 
-// Multi-Turn AI Chat with Search Grounding
-app.post('/api/ai-chat', async (req, res) => {
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+function limitLogin(req: Request, res: Response, next: NextFunction) {
+  const now = Date.now();
+  const key = req.ip || 'unknown';
+  let bucket = loginAttempts.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { count: 0, resetAt: now + 15 * 60_000 };
+    loginAttempts.set(key, bucket);
+  }
+  if (bucket.count >= 12) return res.status(429).json({ error: 'Too many sign-in attempts. Try again in 15 minutes.' });
+  bucket.count += 1;
+  if (loginAttempts.size > 5_000) {
+    for (const [ip, entry] of loginAttempts) if (entry.resetAt <= now) loginAttempts.delete(ip);
+  }
+  return next();
+}
+
+async function issueSession(userId: string, res: Response) {
+  const token = randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
+  await pool.query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [digest(token), userId, expiresAt]);
+  res.setHeader('Set-Cookie', cookieOptions(SESSION_DAYS * 24 * 60 * 60).replace(`${cookieName}=;`, `${cookieName}=${token};`));
+}
+
+function validateCredentials(body: any): { email: string; password: string } | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  if (typeof body.email !== 'string' || typeof body.password !== 'string') return null;
+  const email = body.email.trim().toLowerCase();
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return null;
+  if (body.password.length < 10 || body.password.length > 128) return null;
+  return { email, password: body.password };
+}
+
+app.post('/api/auth/register', limitLogin, async (req, res) => {
+  const credentials = validateCredentials(req.body);
+  if (!credentials) return res.status(400).json({ error: 'Enter a valid email and a password with at least 10 characters.' });
   try {
-    const { message, history, studentContext, useSearch = false } = req.body;
-    if (!message || typeof message !== 'string') {
-      return res.status(400).json({ error: 'Message is required' });
-    }
-
-    const studentName = studentContext?.name || 'UPSA Scholar';
-    const programme = studentContext?.programme || 'Information Technology & Business';
-    const level = studentContext?.level || 100;
-    const gpa = studentContext?.gpa || 3.75;
-
-    const systemInstruction = `You are "UPSA Genius AI", the virtual peer academic mentor and campus guide at the University of Professional Studies, Accra (UPSA), Ghana.
-You assist ${studentName}, a Level ${level} student studying ${programme} with a GPA of ${gpa}.
-Personality and Tone:
-- Encouraging, intelligent, warm, articulate, and culturally authentic Ghanaian university voice (uses student terms like "Chale", "Sharp", "Solid work", "You got this").
-- Expert in UPSA academic faculties: Accounting & Finance, Information Technology, Business Administration, Marketing, and Law.
-- Real campus landmarks: Lecture Block Complex (LBC), Central Library, AstroTurf sports pitch, Banking Square, Students Centre (Auntie Mansah's Waakye spot), Access Hostel, and Mandela Block.
-- Provide structured answers, clean bullet points, and practical examples for academic concepts.
-- When answering real-world or university questions with search grounding, provide accurate, verified facts.`;
-
-    if (aiClient) {
-      try {
-        // Build multi-turn contents from history
-        const contents: any[] = [];
-
-        if (Array.isArray(history) && history.length > 0) {
-          for (const item of history.slice(-6)) {
-            contents.push({
-              role: item.role === 'model' ? 'model' : 'user',
-              parts: [{ text: item.text }],
-            });
-          }
-        }
-
-        // Add current user message
-        contents.push({
-          role: 'user',
-          parts: [{ text: message }],
-        });
-
-        // Use gemini-3.5-flash with search grounding if requested or for real-time queries
-        const modelName = useSearch ? 'gemini-3.5-flash' : 'gemini-3.8-flash';
-        const config: any = {
-          systemInstruction,
-        };
-
-        if (useSearch) {
-          config.tools = [{ googleSearch: {} }];
-        }
-
-        const response = await aiClient.models.generateContent({
-          model: modelName,
-          contents,
-          config,
-        });
-
-        const reply = response.text || 'Keep studying hard, UPSA scholar!';
-
-        // Extract Search Grounding sources if available
-        let sources: Array<{ title: string; url: string }> = [];
-        const metadata = (response as any).candidates?.[0]?.groundingMetadata;
-        if (metadata?.groundingChunks) {
-          sources = metadata.groundingChunks
-            .filter((chunk: any) => chunk.web?.uri)
-            .map((chunk: any) => ({
-              title: chunk.web?.title || 'Source',
-              url: chunk.web?.uri,
-            }))
-            .slice(0, 3);
-        }
-
-        return res.json({ reply, sources });
-      } catch (geminiError: any) {
-        console.warn('Gemini API call failed, using intelligent campus fallback:', geminiError?.message);
-      }
-    }
-
-    // Intelligent campus fallback response if API key is not set or network is unreachable
-    const lower = message.toLowerCase();
-    let fallbackReply = `Chale! As a proud UPSA scholar studying ${programme}, revision at the Central Library and active participation in the LBC lectures are the proven foundation for First Class Honours!`;
-
-    if (lower.includes('account') || lower.includes('balance') || lower.includes('debit') || lower.includes('credit')) {
-      fallbackReply = `📊 Fundamental Accounting Rule: The accounting equation must always balance: Assets = Liabilities + Owner's Equity! Remember to Debit assets and expenses when they increase, and Credit revenues and liabilities when they increase. Dr. Boateng will test this in LBC Hall 4!`;
-    } else if (lower.includes('it') || lower.includes('code') || lower.includes('python') || lower.includes('algorithm')) {
-      fallbackReply = `💻 Tech Insight: Algorithms are step-by-step instructions. For queues, use First-In First-Out (FIFO); for stacks, use Last-In First-Out (LIFO). Practice coding in the LBC Computer Lab 2!`;
-    } else if (lower.includes('food') || lower.includes('eat') || lower.includes('waakye') || lower.includes('jollof')) {
-      fallbackReply = `🍛 Campus Dining: Auntie Mansah's Food Spot at the Students Centre has hot Waakye with shito, boiled eggs, fried plantain, and chilled Sobolo! It instantly restores your Hunger (+40%) and Happiness (+35%).`;
-    } else if (lower.includes('hostel') || lower.includes('sleep') || lower.includes('room')) {
-      fallbackReply = `🛌 Hostel Quad: Access Hostel and Mandela Block offer comfortable 1-4 occupant rooms. Always get at least 6-8 hours of sleep in your room bed to keep your Energy at 100% for lectures!`;
-    } else if (lower.includes('gpa') || lower.includes('grade') || lower.includes('exam')) {
-      fallbackReply = `🎓 First Class Standing: UPSA requires a Cumulative GPA between 3.60 and 4.00. High attendance, acing the lecture quizzes, and scoring high in mid-sems will secure your degree!`;
-    } else if (lower.includes('money') || lower.includes('momo') || lower.includes('cedi') || lower.includes('bank')) {
-      fallbackReply = `📱 Finances & MoMo: Manage your funds with CampusPay / MTN MoMo. You can receive allowance transfers from home or pick up student gigs at the Banking Square to earn up to GH₵ 110 per shift!`;
-    }
-
-    return res.json({ reply: fallbackReply, sources: [] });
+    const actualSalt = randomBytes(16).toString('hex');
+    const derived = (await scryptAsync(credentials.password, actualSalt, 64) as Buffer).toString('hex');
+    const encoded = `scrypt:${actualSalt}:${derived}`;
+    const created = await pool.query(
+      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
+      [credentials.email, encoded]
+    );
+    await issueSession(created.rows[0].id, res);
+    return res.status(201).json({ user: { id: created.rows[0].id, email: created.rows[0].email } });
   } catch (error: any) {
-    console.error('Server error handling AI chat:', error);
-    return res.status(500).json({ error: 'Failed to process AI chat request' });
+    if (error?.code === '23505') return res.status(409).json({ error: 'An account already exists for that email.' });
+    console.error('Account registration failed:', error);
+    return res.status(503).json({ error: 'Could not create your account right now.' });
   }
 });
 
-// Setup Vite middlewares in development
-async function startServer() {
-  const isProd = process.env.NODE_ENV === 'production';
+app.post('/api/auth/login', limitLogin, async (req, res) => {
+  if (!req.body || typeof req.body.email !== 'string' || typeof req.body.password !== 'string') {
+    return res.status(400).json({ error: 'Enter your email and password.' });
+  }
+  const email = req.body.email.trim().toLowerCase();
+  if (email.length > 254 || req.body.password.length > 128) return res.status(400).json({ error: 'Invalid sign-in details.' });
+  try {
+    const result = await pool.query('SELECT id, email, password_hash FROM users WHERE email = $1', [email]);
+    if (!result.rowCount) return res.status(401).json({ error: 'Email or password is incorrect.' });
+    const [scheme, salt, expectedHex] = result.rows[0].password_hash.split(':');
+    const actual = scheme === 'scrypt' && salt && expectedHex ? await scryptAsync(req.body.password, salt, 64) as Buffer : Buffer.alloc(64);
+    const expected = Buffer.from(expectedHex || '', 'hex');
+    if (scheme !== 'scrypt' || expected.length !== actual.length || !timingSafeEqual(actual, expected)) {
+      return res.status(401).json({ error: 'Email or password is incorrect.' });
+    }
+    await issueSession(result.rows[0].id, res);
+    return res.json({ user: { id: result.rows[0].id, email: result.rows[0].email } });
+  } catch (error) {
+    console.error('Sign-in failed:', error);
+    return res.status(503).json({ error: 'Could not sign in right now.' });
+  }
+});
 
-  if (!isProd) {
+app.get('/api/auth/me', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
+  const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [req.accountId]);
+  if (!result.rowCount) return res.status(401).json({ error: 'Account no longer exists.' });
+  return res.json({ user: result.rows[0] });
+}));
+
+app.post('/api/auth/logout', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
+  const token = req.headers.cookie?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+  if (token) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [digest(token)]);
+  res.setHeader('Set-Cookie', cookieOptions(0));
+  return res.status(204).end();
+}));
+
+app.get('/api/save', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
+  const result = await pool.query('SELECT save_data, updated_at FROM game_saves WHERE user_id = $1', [req.accountId]);
+  return res.json({ save: result.rows[0]?.save_data ?? null, updatedAt: result.rows[0]?.updated_at ?? null });
+}));
+
+app.put('/api/save', requireAccount, asyncRoute(async (req: AccountRequest, res: Response) => {
+  const data = req.body?.save;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return res.status(400).json({ error: 'A save object is required.' });
+  const entries = Object.entries(data);
+  if (entries.some(([key, value]) => !SAVE_KEYS.has(key) || typeof value !== 'string' || value.length > 500_000)) {
+    return res.status(400).json({ error: 'The save contains unsupported or oversized game data.' });
+  }
+  if (Buffer.byteLength(JSON.stringify(data), 'utf8') > 900_000) return res.status(413).json({ error: 'The save is too large.' });
+  await pool.query(
+    `INSERT INTO game_saves (user_id, save_data, updated_at) VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (user_id) DO UPDATE SET save_data = EXCLUDED.save_data, updated_at = NOW()`,
+    [req.accountId, JSON.stringify(data)]
+  );
+  return res.json({ saved: true });
+}));
+
+app.get('/api/health', asyncRoute(async (_req: AccountRequest, res: Response) => {
+  try {
+    await pool.query('SELECT 1');
+    return res.json({ status: 'ok', database: 'connected' });
+  } catch {
+    return res.status(503).json({ status: 'unavailable', database: 'disconnected' });
+  }
+}));
+
+
+app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Unhandled request error:', error);
+  return res.status(500).json({ error: 'The server could not complete that request.' });
+});
+
+async function startServer() {
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required. Copy .env.example and start the local PostgreSQL service.');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      email text NOT NULL UNIQUE,
+      password_hash text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash char(64) PRIMARY KEY,
+      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at timestamptz NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions (expires_at);
+    CREATE TABLE IF NOT EXISTS game_saves (
+      user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      save_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+      updated_at timestamptz NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query('DELETE FROM sessions WHERE expires_at <= NOW()');
+  setInterval(() => { void pool.query('DELETE FROM sessions WHERE expires_at <= NOW()').catch((error) => console.error('Session cleanup failed:', error)); }, 60 * 60_000).unref();
+
+  if (process.env.NODE_ENV !== 'production') {
     const { createServer } = await import('vite');
-    const vite = await createServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const vite = await createServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-    });
+    app.use(express.static(path.resolve(__dirname, 'dist'), { index: false, maxAge: '1h' }));
+    app.get('*', (_req, res) => res.sendFile(path.resolve(__dirname, 'dist', 'index.html')));
   }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`UPSA Life server running on http://0.0.0.0:${PORT}`);
-  });
+  app.listen(PORT, '0.0.0.0', () => console.log(`UPSA Life listening on port ${PORT}`));
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error('UPSA Life failed to start:', error);
+  process.exit(1);
+});
