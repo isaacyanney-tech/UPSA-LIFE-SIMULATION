@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: upsa_life
+      POSTGRES_USER: upsa_life
+      POSTGRES_PASSWORD: local_upsa_life_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - upsa_life_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U upsa_life -d upsa_life"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  upsa_life_postgres:
