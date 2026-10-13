@@ -1,4 +1,5 @@
 import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,7 +13,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '16kb' }));
 
 // Initialize Gemini API client if API key is present
 const apiKey = process.env.GEMINI_API_KEY;
@@ -21,18 +22,67 @@ if (apiKey) {
   aiClient = new GoogleGenAI({ apiKey });
 }
 
+// In-memory per-IP throttling. For multi-instance deployments, enforce a shared
+// limit at the load balancer or use a shared store.
+const AI_RATE_WINDOW_MS = 60_000;
+const AI_RATE_MAX_REQUESTS = 8;
+const aiRequestBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function limitAiChat(req: Request, res: Response, next: NextFunction) {
+  const now = Date.now();
+  const key = req.ip || 'unknown';
+  let bucket = aiRequestBuckets.get(key);
+
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { count: 0, resetAt: now + AI_RATE_WINDOW_MS };
+    aiRequestBuckets.set(key, bucket);
+  }
+
+  if (bucket.count >= AI_RATE_MAX_REQUESTS) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+    return res.status(429).json({ error: 'Too many AI requests. Please try again shortly.' });
+  }
+
+  bucket.count += 1;
+  if (aiRequestBuckets.size > 5_000) {
+    for (const [ip, entry] of aiRequestBuckets) {
+      if (entry.resetAt <= now) aiRequestBuckets.delete(ip);
+    }
+  }
+  return next();
+}
+
 // Multi-Turn AI Chat with Search Grounding
-app.post('/api/ai-chat', async (req, res) => {
+app.post('/api/ai-chat', limitAiChat, async (req, res) => {
   try {
-    const { message, history, studentContext, useSearch = false } = req.body;
-    if (!message || typeof message !== 'string') {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: 'A JSON object is required' });
+    }
+    const { message, history, studentContext, useSearch } = body;
+    if (typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ error: 'Message is required' });
     }
+    if (message.length > 4_000) {
+      return res.status(413).json({ error: 'Message must be 4,000 characters or fewer' });
+    }
+    if (history !== undefined && !Array.isArray(history)) {
+      return res.status(400).json({ error: 'History must be an array' });
+    }
+    const safeHistory = Array.isArray(history) ? history.slice(-6) : [];
+    if (safeHistory.some((item) =>
+      !item || typeof item !== 'object' ||
+      !['user', 'model'].includes(item.role) ||
+      typeof item.text !== 'string' || item.text.length > 2_000
+    )) {
+      return res.status(400).json({ error: 'Each history item must have a valid role and a message of 2,000 characters or fewer' });
+    }
 
-    const studentName = studentContext?.name || 'UPSA Scholar';
-    const programme = studentContext?.programme || 'Information Technology & Business';
-    const level = studentContext?.level || 100;
-    const gpa = studentContext?.gpa || 3.75;
+    const safeContext = studentContext && typeof studentContext === 'object' ? studentContext : {};
+    const studentName = typeof safeContext.name === 'string' ? safeContext.name.slice(0, 80) : 'UPSA Scholar';
+    const programme = typeof safeContext.programme === 'string' ? safeContext.programme.slice(0, 120) : 'Information Technology & Business';
+    const level = Number.isFinite(safeContext.level) ? Math.min(500, Math.max(100, safeContext.level)) : 100;
+    const gpa = Number.isFinite(safeContext.gpa) ? Math.min(4, Math.max(0, safeContext.gpa)) : 3.75;
 
     const systemInstruction = `You are "UPSA Genius AI", the virtual peer academic mentor and campus guide at the University of Professional Studies, Accra (UPSA), Ghana.
 You assist ${studentName}, a Level ${level} student studying ${programme} with a GPA of ${gpa}.
@@ -49,7 +99,7 @@ Personality and Tone:
         const contents: any[] = [];
 
         if (Array.isArray(history) && history.length > 0) {
-          for (const item of history.slice(-6)) {
+          for (const item of safeHistory) {
             contents.push({
               role: item.role === 'model' ? 'model' : 'user',
               parts: [{ text: item.text }],
@@ -64,12 +114,12 @@ Personality and Tone:
         });
 
         // Use gemini-3.5-flash with search grounding if requested or for real-time queries
-        const modelName = useSearch ? 'gemini-3.5-flash' : 'gemini-3.8-flash';
+        const modelName = 'gemini-3.8-flash';
         const config: any = {
           systemInstruction,
         };
 
-        if (useSearch) {
+        if (useSearch === true) {
           config.tools = [{ googleSearch: {} }];
         }
 
