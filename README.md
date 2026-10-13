@@ -1,39 +1,37 @@
 # UPSA Life
 
-A browser-based student life simulation set at the University of Professional Studies, Accra. Explore the campus and hostel, attend activities, manage in-game needs and finances, and chat with a campus tutor.
+UPSA Life is a browser-based campus life simulation for UPSA students. Explore the fictional campus, meet student characters, attend activities, manage in-game needs and finances, and follow missions.
 
 ## Requirements
 
 - Node.js 20.19 or newer (or 22.12 or newer), as required by Vite 8.
 - npm.
-- A Gemini API key is optional. Without it, the tutor uses local fallback responses.
 
 ## Run locally
 
 ```sh
 npm install
-cp .env.example .env
-# Set GEMINI_API_KEY in .env if you want live AI tutor responses.
 npm run dev
 ```
 
-Open http://localhost:3000. The app stores simulation saves in this browser's local storage. Resetting a game removes only UPSA Life save keys.
+Open http://localhost:3000. Simulation saves stay in this browser's local storage. Resetting a game removes only UPSA Life save keys.
 
 ## Build and serve
 
 ```sh
 npm run check
-npm start
+npm run build
+NODE_ENV=production npm start
 ```
 
-The production server serves the generated `dist` directory. Set `NODE_ENV=production` and `GEMINI_API_KEY` in the hosting environment. Keep the API key on the server; never add it to frontend environment variables.
+The production server serves the generated `dist` directory on port 3000. Configure the host with Node.js 20.19+ and set `NODE_ENV=production`.
 
-## AI tutor and privacy
+## Free offline guide and NPCs
 
-When live AI is enabled, the tutor request sends the question, recent chat context, and the student's name, programme, level, and GPA to this server. The server forwards that information to Google's Gemini API. Do not enter real personal or academic information unless you are comfortable sharing it with that service. Saves remain in browser local storage; this prototype does not provide accounts or cloud save synchronization.
+The phone's study and campus guide and NPC text replies use authored, deterministic rules in the app. They make no AI-provider requests, need no API key, and incur no model usage charges. The guide offers a small set of study prompts, course concept explanations, and fictional in-game location help; it is not a general-purpose language model and does not provide official UPSA information.
 
-The AI route limits each IP to 8 requests per minute and caps request/history sizes. The limiter is in-memory and applies per server process. For multi-instance deployments, add a shared rate-limit store or enforce quotas at the gateway, and configure proxy handling only for trusted reverse proxies.
+The dashboard includes a fictional game activity based on the simulated day and week. It is not a real university event.
 
-## Prototype scope
+## Privacy and production scope
 
-Campus notices, academic standing, wallet balances, NPC conversations, and campus landmarks are simulated content. They are not official UPSA records or services. The AI tutor can make mistakes; verify real academic and university information with official sources.
+This prototype stores game progress in browser local storage and does not provide accounts, cloud saves, multiplayer, or a moderation/admin service. Do not enter real student records. Campus notices, NPCs, academic figures, landmarks, and wallet balances are simulated game content, not official UPSA services or information. Verify real academic and university information with UPSA.
