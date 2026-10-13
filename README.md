@@ -1,37 +1,48 @@
 # UPSA Life
 
-UPSA Life is a browser-based campus life simulation for UPSA students. Explore the fictional campus, meet student characters, attend activities, manage in-game needs and finances, and follow missions.
-
-## Requirements
-
-- Node.js 20.19 or newer (or 22.12 or newer), as required by Vite 8.
-- npm.
+A browser-based campus life game for UPSA students. Explore the fictional campus, meet student characters, attend activities, manage in-game needs and finances, and follow missions. The study guide and NPC responses run locally without AI API calls.
 
 ## Run locally
 
+Requirements: Node.js 20.19+ and Docker Desktop (or another PostgreSQL 16 server).
+
+1. Copy `.env.example` to `.env`.
+2. Start the local database: `docker compose up -d db`.
+3. Install packages: `npm install`.
+4. Start the app: `npm run dev`.
+5. Open http://localhost:3000.
+
+The server creates the required database tables on startup. Local saves remain in this browser. Create an account to sync progress to PostgreSQL.
+
+## Build and production server
+
 ```sh
 npm install
-npm run dev
-```
-
-Open http://localhost:3000. Simulation saves stay in this browser's local storage. Resetting a game removes only UPSA Life save keys.
-
-## Build and serve
-
-```sh
 npm run check
 npm run build
 NODE_ENV=production npm start
 ```
 
-The production server serves the generated `dist` directory on port 3000. Configure the host with Node.js 20.19+ and set `NODE_ENV=production`.
+The Node server serves the built site and its account/save APIs on `PORT` (3000 by default). Deploy the Node server and PostgreSQL database together or connect it to a managed PostgreSQL service. Configure these secrets in the hosting dashboard:
 
-## Free offline guide and NPCs
+- `DATABASE_URL`: private connection string for PostgreSQL.
+- `DATABASE_SSL=true` when required by your database host.
+- `NODE_ENV=production`.
+- `PORT`: supplied by most app hosts.
+- `TRUST_PROXY_HOPS`: number of trusted hosting proxies (usually 1 when deployed behind one proxy).
 
-The phone's study and campus guide and NPC text replies use authored, deterministic rules in the app. They make no AI-provider requests, need no API key, and incur no model usage charges. The guide offers a small set of study prompts, course concept explanations, and fictional in-game location help; it is not a general-purpose language model and does not provide official UPSA information.
+Keep the database private. Use managed backups and point-in-time recovery for production. The server applies additive `CREATE TABLE IF NOT EXISTS` schema setup at startup; see `db/schema.sql`.
 
-The dashboard includes a fictional game activity based on the simulated day and week. It is not a real university event.
+## Accounts and saves
 
-## Privacy and production scope
+Users create accounts with an email and password (10–128 characters). Passwords are stored as salted scrypt hashes. Sessions use random HttpOnly, SameSite cookies with a 14-day expiry; production cookies require HTTPS. Game saves are private per account and stored as JSONB. A save is synchronized while the game is open and restored on sign-in. Local browser storage remains available for guests and brief network interruptions.
 
-This prototype stores game progress in browser local storage and does not provide accounts, cloud saves, multiplayer, or a moderation/admin service. Do not enter real student records. Campus notices, NPCs, academic figures, landmarks, and wallet balances are simulated game content, not official UPSA services or information. Verify real academic and university information with UPSA.
+The prototype does not yet include email verification, password-reset email, MFA, account deletion UI, moderation, or multiplayer. Add those before a broad public launch. Never use real UPSA credentials or enter real academic records.
+
+## Product content
+
+Campus locations, events, student characters, grades, notices, and wallet values are simulated content, not official UPSA records or services. Verify campus details, get permission for UPSA branding, and run a student pilot before representing the game as officially affiliated.
+
+## Free offline guide
+
+The phone guide, contextual NPC text and rotating game activity are authored local rules/content. They do not call a model provider and do not incur AI API charges. The tutor is not a general-purpose language model or official source.
